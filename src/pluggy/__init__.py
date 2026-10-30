@@ -1,6 +1,8 @@
 __all__ = [
     "HookCallError",
     "HookCaller",
+    "HookCallPlan",
+    "HookCallPlanError",
     "HookImpl",
     "HookRelay",
     "HookimplMarker",
@@ -23,6 +25,8 @@ from ._hooks import HookspecMarker
 from ._hooks import HookspecOpts
 from ._manager import PluginManager
 from ._manager import PluginValidationError
+from ._plan import HookCallPlan
+from ._plan import HookCallPlanError
 from ._result import HookCallError
 from ._result import Result
 from ._warnings import PluggyTeardownRaisedWarning

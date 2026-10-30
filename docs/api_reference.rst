@@ -33,6 +33,13 @@ API Reference
     :show-inheritance:
     :members:
 
+.. autoclass:: pluggy.HookCallPlan()
+    :members:
+
+.. autoclass:: pluggy.HookCallPlanError()
+    :show-inheritance:
+    :members:
+
 .. autoclass:: pluggy.Result()
     :show-inheritance:
     :members:

@@ -26,6 +26,7 @@ from ._hooks import HookimplOpts
 from ._hooks import HookRelay
 from ._hooks import HookspecOpts
 from ._hooks import normalize_hookimpl_opts
+from ._plan import HookCallPlan
 from ._result import Result
 
 
@@ -653,6 +654,32 @@ class PluginManager:
         if not plugins_to_remove:
             return orig
         return _SubsetHookCaller(orig, plugins_to_remove)
+
+    def plan_hook_call(self, name: str, plugins: Iterable[_Plugin]) -> HookCallPlan:
+        """Create an immutable :class:`HookCallPlan` for the named hook.
+
+        The plan only covers the implementations contributed by the given
+        ``plugins`` and records their final call order ahead of the call.
+        It can be inspected without calling any plugin callback and without
+        changing plugin registrations, and executed repeatedly with
+        ``plan(**kwargs)``.
+
+        :param name:
+            The name of the hook, as used for ``pm.hook.<name>``.
+
+        :param plugins:
+            The registered plugin objects whose implementations participate.
+            Every plugin must be registered and may be listed only once.
+            Plugins which do not implement the hook simply contribute no
+            implementations.
+
+        :raises HookCallPlanError:
+            If the hook does not exist, is historic, a plugin is not
+            registered, or the same plugin was selected more than once.
+
+        .. versionadded:: 1.8
+        """
+        return HookCallPlan(self, name, plugins)
 
 
 def _formatdef(func: Callable[..., object]) -> str:
