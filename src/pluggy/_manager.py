@@ -11,7 +11,9 @@ from typing import cast
 from typing import Final
 from typing import TYPE_CHECKING
 from typing import TypeAlias
+import uuid
 import warnings
+from weakref import WeakKeyDictionary
 
 from . import _tracing
 from ._callers import _multicall
@@ -32,11 +34,46 @@ from ._result import Result
 if TYPE_CHECKING:
     import importlib.metadata
 
+    from ._snapshot import PluginManagerSnapshot
+
 
 _BeforeTrace: TypeAlias = Callable[[str, Sequence[HookImpl], Mapping[str, Any]], None]
 _AfterTrace: TypeAlias = Callable[
     [Result[Any], str, Sequence[HookImpl], Mapping[str, Any]], None
 ]
+
+#: Identifies a single historic event delivery: ``(hook name, event index)``,
+#: where the index is the event's stable position in the hook's call history.
+_ReplayKey: TypeAlias = tuple[str, int]
+
+
+class _HistoricReplay:
+    """Per-manager bookkeeping for historic events inherited from a snapshot.
+
+    Only managers restored from a :class:`~pluggy.PluginManagerSnapshot` own
+    one. It records which ``(hook, event)`` pairs each plugin has already
+    received, so an inherited event is delivered to a given plugin at most
+    once, even across unregister/re-register cycles. Entries are keyed weakly
+    whenever the plugin supports it, so tracking does not keep plugins alive.
+    """
+
+    __slots__ = ("strong", "weak")
+
+    def __init__(self) -> None:
+        self.weak: WeakKeyDictionary[_Plugin, set[_ReplayKey]] = WeakKeyDictionary()
+        # Fallback for plugins which are not weakly referenceable (e.g. ints).
+        self.strong: dict[int, tuple[_Plugin, set[_ReplayKey]]] = {}
+
+    def delivered(self, plugin: _Plugin) -> set[_ReplayKey]:
+        """Return the set of delivered-event keys for ``plugin``."""
+        try:
+            return self.weak.setdefault(plugin, set())
+        except TypeError:
+            entry = self.strong.get(id(plugin))
+            if entry is None or entry[0] is not plugin:
+                entry = (plugin, set())
+                self.strong[id(plugin)] = entry
+            return entry[1]
 
 
 def _warn_for_function(warning: Warning, function: Callable[..., object]) -> None:
@@ -168,6 +205,27 @@ class PluginManager:
             "pluginmanage"
         )
         self._inner_hookexec = _multicall
+        #: Monotonic structural version, bumped whenever the registry, the
+        #: blocked names or the hook specifications change. Recorded by
+        #: snapshots as the "manager version".
+        self._pm_version: int = 0
+        #: Unique, stable identity of this manager instance. Snapshots retain
+        #: it to reject restoration back into the originating manager.
+        self._manager_uuid: Final[uuid.UUID] = uuid.uuid4()
+        #: Historic-event delivery bookkeeping. ``None`` for ordinary
+        #: managers; installed when the manager is restored from a snapshot.
+        self._historic_replay: _HistoricReplay | None = None
+
+    @property
+    def manager_version(self) -> int:
+        """The manager's current structural version.
+
+        Starts at ``0`` and increases by one on every change to the plugin
+        registry, blocked names or hook specifications. A
+        :class:`~pluggy.PluginManagerSnapshot` records the version it was
+        taken at.
+        """
+        return self._pm_version
 
     def _hookexec(
         self,
@@ -249,8 +307,9 @@ class PluginManager:
                 # first pass. Failing here leaves the plugin partially
                 # registered, but only user code during replay can get here.
                 self._verify_hook(hook, hookimpl)
-            hook._maybe_apply_history(hookimpl)
+            self._apply_historic_replay(hook, hookimpl)
             hook._add_hookimpl(hookimpl)
+        self._pm_version += 1
         return plugin_name
 
     def parse_hookimpl_opts(self, plugin: _Plugin, name: str) -> HookimplOpts | None:
@@ -277,7 +336,11 @@ class PluginManager:
         )
 
     def unregister(
-        self, plugin: _Plugin | None = None, name: str | None = None
+        self,
+        plugin: _Plugin | None = None,
+        name: str | None = None,
+        *,
+        _bump_version: bool = True,
     ) -> Any | None:
         """Unregister a plugin and all of its hook implementations.
 
@@ -315,15 +378,23 @@ class PluginManager:
                 hookcaller._remove_plugin(plugin)
 
         if not self.is_blocked(name):
-            self._name2plugin.pop(name, None)
+            removed = self._name2plugin.pop(name, None) is not None
+        else:
+            removed = False
         self._name2dist.pop(name, None)
+        if removed and _bump_version:
+            self._pm_version += 1
 
         return plugin
 
     def set_blocked(self, name: str) -> None:
         """Block registrations of the given name, unregister if already registered."""
-        self.unregister(name=name)
+        was_blocked = self.is_blocked(name)
+        # Blocking is one structural change, even when it unregisters a plugin.
+        self.unregister(name=name, _bump_version=False)
         self._name2plugin[name] = None
+        if not was_blocked:
+            self._pm_version += 1
 
     def is_blocked(self, name: str) -> bool:
         """Return whether the given plugin name is blocked."""
@@ -336,6 +407,7 @@ class PluginManager:
         """
         if self._name2plugin.get(name, -1) is None:
             del self._name2plugin[name]
+            self._pm_version += 1
             return True
         return False
 
@@ -364,6 +436,7 @@ class PluginManager:
             raise ValueError(
                 f"did not find any {self.project_name!r} hooks in {module_or_class!r}"
             )
+        self._pm_version += 1
 
     def parse_hookspec_opts(
         self, module_or_class: _Namespace, name: str
@@ -425,6 +498,35 @@ class PluginManager:
             if plugin == val:
                 return name
         return None
+
+    def _apply_historic_replay(self, hook: HookCaller, hookimpl: HookImpl) -> None:
+        """Replay the historic calls recorded before ``hookimpl`` existed.
+
+        Ordinary managers delegate straight to
+        :meth:`HookCaller._maybe_apply_history`, replaying every event every
+        time a plugin is registered. Managers restored from a snapshot
+        override the delivery policy through their :class:`_HistoricReplay`
+        bookkeeping, so each inherited event reaches a given plugin at most
+        once.
+        """
+        replay = self._historic_replay
+        if replay is None or not hook.is_historic():
+            hook._maybe_apply_history(hookimpl)
+            return
+        assert hook._call_history is not None
+        delivered = replay.delivered(hookimpl.plugin)
+        for index, (kwargs, result_callback) in enumerate(hook._call_history):
+            key = (hook.name, index)
+            if key in delivered:
+                continue
+            # Mark before executing: an event counts as delivered even if the
+            # plugin callback raises, so it is never replayed to this plugin.
+            delivered.add(key)
+            result = self._hookexec(hook.name, [hookimpl], kwargs, False)
+            if result and result_callback is not None:
+                # firstresult is not compatible with historic.
+                assert isinstance(result, list)
+                result_callback(result[0])
 
     def _verify_hook(self, hook: HookCaller, hookimpl: HookImpl) -> None:
         if hook.is_historic() and (hookimpl.hookwrapper or hookimpl.wrapper):
@@ -653,6 +755,40 @@ class PluginManager:
         if not plugins_to_remove:
             return orig
         return _SubsetHookCaller(orig, plugins_to_remove)
+
+    def snapshot(self) -> PluginManagerSnapshot:
+        """Return an immutable :class:`~pluggy.PluginManagerSnapshot` of this
+        manager's current state.
+
+        The snapshot records the hook specifications, registered plugin
+        identities and their names, blocked names, hook implementation
+        metadata and ordering, the manager version, and the history of
+        :ref:`historic <historic>` calls. Taking a snapshot does not modify
+        the manager or call any plugin code.
+
+        Use :meth:`PluginManagerSnapshot.restore` to build a new, fully
+        isolated manager from the snapshot.
+        """
+        from ._snapshot import take_snapshot
+
+        return take_snapshot(self)
+
+    def restore_snapshot(self, snapshot: PluginManagerSnapshot) -> None:
+        """Restore :class:`~pluggy.PluginManagerSnapshot` state into this
+        manager.
+
+        This manager must be fresh (the same ``project_name`` and no plugins,
+        blocked names or hookspecs of its own) and must not be the manager
+        that created the snapshot. Prefer :meth:`PluginManagerSnapshot.restore`
+        to create a new clone directly.
+
+        Raises a :class:`~pluggy.SnapshotError` subclass for destroyed,
+        reused, expired or cross-manager snapshots, before any plugin code
+        runs; on failure the manager is left untouched.
+        """
+        from ._snapshot import restore_snapshot
+
+        restore_snapshot(self, snapshot)
 
 
 def _formatdef(func: Callable[..., object]) -> str:

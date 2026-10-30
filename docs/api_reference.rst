@@ -8,6 +8,24 @@ API Reference
 .. autoclass:: pluggy.PluginManager
     :members:
 
+.. autoclass:: pluggy.PluginManagerSnapshot
+    :members:
+
+.. autoclass:: pluggy.SnapshotError
+    :show-inheritance:
+
+.. autoclass:: pluggy.SnapshotExpiredError
+    :show-inheritance:
+
+.. autoclass:: pluggy.SnapshotCrossManagerError
+    :show-inheritance:
+
+.. autoclass:: pluggy.SnapshotReusedError
+    :show-inheritance:
+
+.. autoclass:: pluggy.SnapshotDestroyedError
+    :show-inheritance:
+
 .. autoclass:: pluggy.PluginValidationError
     :show-inheritance:
     :members:

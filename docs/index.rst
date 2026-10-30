@@ -1080,6 +1080,68 @@ The expected signature and default implementations for these functions is:
     def after(outcome, hook_name, hook_impls, kwargs):
         pass
 
+Snapshots and isolated clones
+*****************************
+A complex host sometimes needs several independent plugin contexts -- for
+previewing a change, rolling back to a previous configuration, or keeping
+multiple configurations side by side. Instead of rebuilding a
+:py:class:`~pluggy.PluginManager` from scratch, you can take an immutable
+:py:class:`~pluggy.PluginManagerSnapshot` of the current state and restore it
+into a brand new, fully isolated manager::
+
+    snapshot = pm.snapshot()
+    clone = snapshot.restore()
+
+The snapshot records, immutably:
+
+* the hook specifications,
+* the registered plugin identities and their names,
+* the blocked names,
+* the hook implementation metadata and call ordering,
+* the manager's structural :attr:`~pluggy.PluginManager.manager_version`, and
+* the history of every :ref:`historic <historic>` hook.
+
+Taking a snapshot never calls plugin code, and later changes to the source
+manager do not affect existing snapshots: each one always restores to the
+exact state it was captured at.
+
+The clone is an ordinary :py:class:`~pluggy.PluginManager`. Building it wires
+the existing implementations up directly without invoking any plugin
+callback, and it never modifies the source manager. Registrations,
+unregistrations, added hookspecs, blocking, :py:meth:`~pluggy.PluginManager.check_pending`
+and hook implementation ordering are all independent afterwards. Normal
+calls, wrappers (both styles), ``firstresult``, :class:`~pluggy.Result`,
+:py:meth:`~pluggy.HookCaller.call_extra`,
+:py:meth:`~pluggy.PluginManager.subset_hook_caller`,
+:py:meth:`~pluggy.PluginManager.enable_tracing` and
+:py:meth:`~pluggy.PluginManager.add_hookcall_monitoring` keep their usual
+semantics in the clone.
+
+Historic events captured in the snapshot replay, in order, to plugins newly
+registered in the clone; the plugins already present when the snapshot was
+taken are considered caught up and are not called again. Any given event is
+delivered to any given plugin at most once, even across
+unregister/re-register cycles. Historic events raised in the clone stay in
+the clone -- they never reach the source manager or another clone. The
+source-side ``result_callback`` of an inherited event is not carried over,
+so clone replay cannot invoke source-scoped code.
+
+Each snapshot is single-use. Restoring a snapshot consumes it, and restoring
+it again raises :class:`~pluggy.SnapshotReusedError`. A snapshot can also be
+released explicitly with :meth:`~pluggy.PluginManagerSnapshot.destroy`.
+:class:`~pluggy.SnapshotExpiredError` (unsupported record format),
+:class:`~pluggy.SnapshotCrossManagerError` (different project, or restoring
+into the originating manager), :class:`~pluggy.SnapshotReusedError` and
+:class:`~pluggy.SnapshotDestroyedError` are all raised before any plugin
+callback could run, and every failed restore leaves both the target manager
+and the snapshot usable. To create several independent contexts, take
+several snapshots (or snapshot a clone again).
+
+You can also restore into an existing fresh manager with
+:py:meth:`~pluggy.PluginManager.restore_snapshot`; it must use the same
+project name, must be empty, and must not be the manager that created the
+snapshot.
+
 Public API
 **********
 Please see the :doc:`api_reference`.

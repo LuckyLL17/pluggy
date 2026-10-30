@@ -10,8 +10,14 @@ __all__ = [
     "PluggyTeardownRaisedWarning",
     "PluggyWarning",
     "PluginManager",
+    "PluginManagerSnapshot",
     "PluginValidationError",
     "Result",
+    "SnapshotCrossManagerError",
+    "SnapshotDestroyedError",
+    "SnapshotError",
+    "SnapshotExpiredError",
+    "SnapshotReusedError",
     "__version__",
 ]
 from ._hooks import HookCaller
@@ -25,6 +31,12 @@ from ._manager import PluginManager
 from ._manager import PluginValidationError
 from ._result import HookCallError
 from ._result import Result
+from ._snapshot import PluginManagerSnapshot
+from ._snapshot import SnapshotCrossManagerError
+from ._snapshot import SnapshotDestroyedError
+from ._snapshot import SnapshotError
+from ._snapshot import SnapshotExpiredError
+from ._snapshot import SnapshotReusedError
 from ._warnings import PluggyTeardownRaisedWarning
 from ._warnings import PluggyWarning
 
